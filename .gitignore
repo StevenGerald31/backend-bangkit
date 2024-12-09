@@ -1,0 +1,32 @@
+# Virtual environment
+venv/
+
+# Environment file
+.env
+
+# Database file
+database.db
+
+# Model files
+model/*.h5
+
+# Python cache
+__pycache__/
+
+# VS Code settings
+.vscode/
+
+# Docker ignore
+.dockerignore
+
+# Log files
+*.log
+
+# Byte-compiled / optimised / DLL files
+*.pyc
+*.pyo
+*.pyd
+
+# Distribution / packaging
+.Python
+*.egg-info/
