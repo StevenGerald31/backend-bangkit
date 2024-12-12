@@ -11,6 +11,8 @@ import pandas as pd
 import pickle
 from tensorflow.keras.models import load_model
 from tensorflow.keras import metrics
+from datetime import datetime, timedelta, date
+from utils.preprocessing_prediction import data_inflasi_dan_komoditas, series_to_supervised
 
 
 routes = Blueprint('routes', __name__)
@@ -28,72 +30,155 @@ def get_time_series():
     connection.close()
     return jsonify(result)
 
-@routes.route('/harga_komoditas/<int:daerah_id>', methods=['GET'])
-def get_time_series_by_region(daerah_id):
-    connection = create_db_connection()
-    if not connection:
-        return jsonify({"error": "Database connection failed"}), 500
 
-    cursor = connection.cursor(dictionary=True)
-    query = "SELECT * FROM harga_komoditas WHERE daerah_id = %s"  # Pastikan nama kolom sesuai dengan tabel Anda
-    cursor.execute(query, (daerah_id,))
-    result = {
-            "error": False,
-            "message": "Success",
-            "prices":cursor.fetchall(),
-            "description": "Harga normal hasil dari aplikasi HP filter pada harga komoditas di daerah tertentu"
-        }
-    connection.close()
-
-    if not result:
-        return jsonify({"message": "Data not found for daerah_id: {}".format(daerah_id)}), 404
-
-    return jsonify(result)
 
 @routes.route('/harga_komoditas/<int:daerah_id>/<int:komoditas_id>', methods=['GET'])
 def get_time_series_by_region_and_commodity(daerah_id, komoditas_id):
-    connection = create_db_connection()
-    if not connection:
-        return jsonify({"error": "Database connection failed"}), 500
+    # Baca parameter `timeRange` dari query string
+    time_range = request.args.get('timeRange', default=1, type=int)  # Default 1 tahun jika tidak ada parameter
 
-    cursor = connection.cursor(dictionary=True)
-    query = """
-        SELECT * FROM harga_komoditas 
-        WHERE daerah_id = %s AND komoditas_id = %s
-    """  # Pastikan nama kolom sesuai dengan tabel Anda
-    cursor.execute(query, (daerah_id, komoditas_id))
-    result = {
-            "error": False,
-            "message": "Success",
-            "prices":cursor.fetchall(),
-            "description": "Harga normal hasil dari aplikasi HP filter pada harga komoditas di daerah tertentu"
-        }
-    connection.close()
-
-    if not result:
-        return jsonify({
-            "message": "Data not found for daerah_id: {} and komoditas_id: {}".format(daerah_id, komoditas_id)
-        }), 404
-
-    return jsonify(result)
-
-@routes.route('/harga_normal/<int:daerah_id>/<int:komoditas_id>', methods=['GET'])
-def get_harga_normal(daerah_id, komoditas_id):
     # Buat koneksi ke database
     connection = create_db_connection()
     if not connection:
         return jsonify({"error": "Database connection failed"}), 500
 
     try:
-        # Query data harga berdasarkan daerah_id dan komoditas_id
+        cursor = connection.cursor(dictionary=True)
+
+        # Hitung tanggal awal berdasarkan timeRange
+        start_date = datetime.now() - timedelta(days=time_range * 365)
+        start_date_str = start_date.strftime('%Y-%m-%d')
+
+        # Query untuk mengambil data dengan filter timeRange
         query = """
-            SELECT tanggal_harga, harga 
-            FROM harga_komoditas 
+            SELECT * 
+            FROM harga_komoditas
+            WHERE daerah_id = %s AND komoditas_id = %s AND tanggal_harga >= %s
+            ORDER BY tanggal_harga ASC
+        """  # Pastikan nama kolom sesuai dengan tabel Anda
+        cursor.execute(query, (daerah_id, komoditas_id, start_date_str))
+
+        # Ambil hasil query
+        prices = cursor.fetchall()
+
+        # Jika tidak ada data
+        if not prices:
+            return jsonify({
+                "error": True,
+                "message": "Data not found for daerah_id: {} and komoditas_id: {} in the last {} year(s)".format(
+                    daerah_id, komoditas_id, time_range
+                )
+            }), 404
+        
+        
+        # Format tanggal menjadi dd-mm-yyyy
+        for price in prices:
+            tanggal_harga = price['tanggal_harga']
+            
+            # If tanggal_harga is already a datetime object, format it directly
+            if isinstance(tanggal_harga, date):
+                price['tanggal_harga'] = tanggal_harga.strftime('%d-%m-%Y')
+            
+
+        # Format hasil
+        result = {
+            "error": False,
+            "message": "Success",
+            "prices": prices,
+            "description": "Data harga komoditas dalam {} tahun terakhir untuk daerah {} dan komoditas {}.".format(
+                time_range, daerah_id, komoditas_id
+            )
+        }
+
+        # Tutup koneksi
+        connection.close()
+
+        return jsonify(result)
+    except Exception as e:
+        # Tutup koneksi jika terjadi error
+        connection.close()
+        return jsonify({"error": str(e)}), 500
+    
+@routes.route('/harga_komoditas/last/<int:daerah_id>/<int:komoditas_id>', methods=['GET'])
+def get_last_price(daerah_id, komoditas_id):
+    # Buat koneksi ke database
+    connection = create_db_connection()
+    if not connection:
+        return jsonify({"error": "Database connection failed"}), 500
+
+    try:
+        cursor = connection.cursor(dictionary=True)
+
+        # Query untuk mengambil data harga terakhir
+        query = """
+            SELECT *
+            FROM harga_komoditas
             WHERE daerah_id = %s AND komoditas_id = %s
-            ORDER BY tanggal_harga
-        """
-        cursor = connection.cursor()
+            ORDER BY tanggal_harga DESC
+            LIMIT 1
+        """  
         cursor.execute(query, (daerah_id, komoditas_id))
+
+        # Ambil hasil query
+        last_price = cursor.fetchone()
+
+        # Jika tidak ada data
+        if not last_price:
+            return jsonify({
+                "error": True,
+                "message": "No data found for daerah_id: {} and komoditas_id: {}".format(daerah_id, komoditas_id)
+            }), 404
+
+        # Format tanggal jika tanggal_harga adalah tipe data date
+        if isinstance(last_price['tanggal_harga'], date):
+            last_price['tanggal_harga'] = last_price['tanggal_harga'].strftime('%d-%m-%Y')
+
+        # Format hasil
+        result = {
+            "error": False,
+            "message": "Success",
+            "last_price": last_price,
+            "description": "Data harga komoditas terakhir untuk daerah {} dan komoditas {}.".format(daerah_id, komoditas_id)
+        }
+
+        # Tutup koneksi
+        connection.close()
+
+        return jsonify(result)
+
+    except Exception as e:
+        # Tutup koneksi jika terjadi error
+        connection.close()
+        return jsonify({"error": str(e)}), 500
+
+
+@routes.route('/harga_normal/<int:daerah_id>/<int:komoditas_id>', methods=['GET'])
+def get_harga_normal_time_range(daerah_id, komoditas_id):
+    # Baca parameter `timeRange` dari query string
+    time_range = request.args.get('timeRange', default=1, type=int)  # Default 1 tahun jika tidak ada parameter
+
+    # Buat koneksi ke database
+    connection = create_db_connection()
+    if not connection:
+        return jsonify({"error": "Database connection failed"}), 500
+
+    try:
+        cursor = connection.cursor()
+
+        # Hitung tanggal awal berdasarkan timeRange
+        start_date = datetime.now() - timedelta(days=time_range * 365)
+        start_date_str = start_date.strftime('%Y-%m-%d')
+
+        # Query untuk mengambil data dengan filter timeRange
+        query = """
+            SELECT tanggal_harga, harga
+            FROM harga_komoditas
+            WHERE daerah_id = %s AND komoditas_id = %s AND tanggal_harga >= %s
+            ORDER BY tanggal_harga ASC
+        """
+        cursor.execute(query, (daerah_id, komoditas_id, start_date_str))
+
+        # Ambil hasil query
         data = cursor.fetchall()
 
         # Tutup koneksi database
@@ -101,7 +186,10 @@ def get_harga_normal(daerah_id, komoditas_id):
 
         # Cek apakah data tersedia
         if not data:
-            return jsonify({"message": f"No data found for daerah_id: {daerah_id} and komoditas_id: {komoditas_id}"}), 404
+            return jsonify({
+                "error": True,
+                "message": f"No data found for daerah_id: {daerah_id}, komoditas_id: {komoditas_id}, in the last {time_range} year(s)."
+            }), 404
 
         # Konversi hasil query menjadi DataFrame
         df = pd.DataFrame(data, columns=['tanggal_harga', 'Harga'])
@@ -110,13 +198,18 @@ def get_harga_normal(daerah_id, komoditas_id):
         cycle, trend = hpfilter(df['Harga'], lamb=24414062500)
         df['Harga_Normal'] = trend.astype(int)  # Tambahkan kolom harga normal
 
+        # Format tanggal jika tanggal_harga adalah tipe data date
+        df['tanggal_harga'] = pd.to_datetime(df['tanggal_harga']).dt.strftime('%d-%m-%Y')
+        
+
         # Konversi hasil ke JSON
         result = {
             "error": False,
             "message": "Success",
             "prices": df[['tanggal_harga', 'Harga_Normal']].to_dict(orient='records'),
-            "description": "Harga normal hasil dari aplikasi HP filter pada harga komoditas di daerah tertentu"
+            "description": f"Harga normal hasil dari aplikasi HP filter dalam {time_range} tahun terakhir untuk komoditas tertentu."
         }
+
         return jsonify(result)
 
     except Exception as e:
@@ -124,6 +217,7 @@ def get_harga_normal(daerah_id, komoditas_id):
         if connection.is_connected():
             connection.close()
         return jsonify({"error": str(e)}), 500
+
 
 # get all data komoditas
 # Route untuk mengambil semua data dari tabel `komoditas`
@@ -162,6 +256,9 @@ def get_all_komoditas():
         # Handle error
         return jsonify({"error": str(e)}), 500
 
+# get all data daerah 
+
+
 @routes.route('/inflasi/<int:id_daerah>', methods=['GET'])
 def get_last_inflasi(id_daerah):
     # Buat koneksi ke database
@@ -194,7 +291,7 @@ def get_last_inflasi(id_daerah):
             "error": False,
             "message": "Success",
             "data": {
-                "tingkat_inflasi": data[0],
+                "tingkat_inflasi": str(data[0]),
                 "tanggal_inflasi": data[1]
             }
         })
@@ -213,7 +310,7 @@ def get_all_daerah():
 
     try:
         # Query untuk mengambil semua data dari tabel daerah
-        query = "SELECT daerah_id, nama_daerah FROM daerah"
+        query = "SELECT daerah_id, nama_daerah, img_url FROM daerah"
         cursor = connection.cursor()
         cursor.execute(query)
         data = cursor.fetchall()
@@ -229,7 +326,8 @@ def get_all_daerah():
         formatted_data = [
             {
                 "daerah_id": row[0],
-                "nama_daerah": row[1]
+                "nama_daerah": row[1],
+                "img_url": row[2]
             } for row in data
         ]
 
@@ -243,128 +341,87 @@ def get_all_daerah():
         # Handle error
         return jsonify({"error": str(e)}), 500
 
+# code preidksi inflasi
+@routes.route('/prediksi/<int:id_daerah>', methods=['GET'])
+def prediksi_inflasi_real(id_daerah):
+    """
+    Endpoint API untuk melakukan prediksi inflasi 1 bulan ke depan berdasarkan id_daerah
+    """
+    # Mengambil data untuk wilayah yang diminta
+    data_prediksi = data_inflasi_dan_komoditas(id_daerah)
 
-from keras.src.legacy.saving import legacy_h5_format
-model = legacy_h5_format.load_model_from_hdf5("model/model_jakarta_pusat.h5", custom_objects={'mse': 'mse'})
-
-@routes.route('/inflasiall/<int:id_daerah>', methods=['GET'])
-def get_all_inflasi(id_daerah):
-    # Buat koneksi ke database
-    connection = create_db_connection()
-    if not connection:
-        return jsonify({"error": "Database connection failed"}), 500
+    if isinstance(data_prediksi, dict) and "error" in data_prediksi:
+        return jsonify(data_prediksi), 400  # Return error if data fetching fails
 
     try:
-        # Query untuk mengambil data terakhir berdasarkan id_daerah
-        query = """
-            SELECT tingkat_inflasi, tanggal_inflasi
-            FROM inflasi
-            WHERE id_daerah = %s
-            ORDER BY tanggal_inflasi DESC
-        """
-        cursor = connection.cursor()
-        cursor.execute(query, (id_daerah,))
-        data = cursor.fetchall()
+        # Menyiapkan fitur dan target
+        features = data_prediksi[['komoditas_id_1', 'komoditas_id_2', 'komoditas_id_3', 'komoditas_id_4', 'komoditas_id_5']].values
+        target = data_prediksi['tingkat_inflasi'].values.reshape(-1, 1)
 
-        # Tutup koneksi database
-        connection.close()
+        # Normalisasi fitur (harga komoditas)
+        scaler_features = MinMaxScaler(feature_range=(0, 1))
+        scaled_features = scaler_features.fit_transform(features)
 
-        # Cek apakah data tersedia
-        if not data:
-            return jsonify({"message": f"No data found for id_daerah: {id_daerah}"}), 404
+        # Normalisasi target (inflasi)
+        scaler_target = MinMaxScaler(feature_range=(0, 1))
+        scaled_target = scaler_target.fit_transform(target)
 
-        # Membuat DataFrame dari hasil query
-        df_inflasi = pd.DataFrame(data, columns=['tingkat_inflasi', 'tanggal_inflasi'])
+        # Gabungkan kembali fitur dan target yang sudah dinormalisasi
+        scaled_data = np.hstack((scaled_features, scaled_target))
 
-        # Kembalikan hasil query dalam format JSON
+        # frame as supervised learning
+        reframed = series_to_supervised(scaled_data, 1, 1)
+        reframed.drop(reframed.columns[[6, 7, 8, 9, 10]], axis=1, inplace=True)
+
+        # Pisahkan input dan output untuk prediksi
+        values = reframed.values
+        test_X = values[:, :-1]
+
+        # Ambil data terakhir untuk prediksi 1 bulan ke depan
+        input_seq = test_X[-1].reshape(1, 1, test_X.shape[1])  # Ambil data terakhir dan reshape
+
+        # Load the model (ensure model path is correct)
+        model = load_model('model.h5')  # Replace with actual model path
+
+        # Prediksi untuk 1 bulan ke depan
+        pred = model.predict(input_seq)
+
+        # Denormalisasi hasil prediksi
+        predicted_inflation = scaler_target.inverse_transform(pred.reshape(-1, 1))
+
+        # Ambil nilai prediksi pertama (karena hanya satu nilai untuk satu prediksi)
+        predicted_inflation_value = predicted_inflation.flatten()[0]
+
+        # Dapatkan data inflasi terakhir dari database
+        last_inflation = get_last_inflasi(id_daerah).json.get('data', {}).get('tingkat_inflasi', None)
+        if last_inflation is not None:
+            last_inflation = float(last_inflation)
+
+        # Interpretasi hasil prediksi
+        if last_inflation is not None:
+            if predicted_inflation_value > last_inflation:
+                deskripsi = ("Inflasi diprediksi akan meningkat dibandingkan bulan sebelumnya, "
+                             "yang dapat menunjukkan adanya tekanan pada harga komoditas utama di daerah ini.")
+            elif predicted_inflation_value < last_inflation:
+                deskripsi = ("Inflasi diprediksi akan menurun dibandingkan bulan sebelumnya, "
+                             "menandakan potensi stabilisasi harga komoditas utama di daerah ini.")
+            else:
+                deskripsi = ("Inflasi diprediksi akan tetap stabil dibandingkan bulan sebelumnya, "
+                             "mengindikasikan tidak adanya perubahan signifikan pada harga komoditas utama.")
+        else:
+            deskripsi = "Data inflasi terakhir tidak tersedia untuk membuat interpretasi."
+
+        # Jika Anda ingin mengembalikan prediksi sebagai response JSON:
         return jsonify({
             "error": False,
             "message": "Success",
-            "data": df_inflasi.to_dict(orient='records')  # Konversi DataFrame ke list of dicts
+            "data": {
+                'prediksi_inflasi': str(round(predicted_inflation_value, 2)),
+                'deskripsi': deskripsi
+            }
         })
+    
+
     except Exception as e:
-        # Handle error
+        # Handle errors
         return jsonify({"error": str(e)}), 500
-    
-# Fungsi untuk mengambil data harga komoditas dari database
-def get_data_model(daerah_id, komoditas_id):
-    connection = create_db_connection()
-    if not connection:
-        return jsonify({"error": "Database connection failed"}), 500
-    
-    try:
-        query = f"""
-        SELECT tanggal_harga, komoditas_id, harga
-        FROM harga_komoditas
-        WHERE daerah_id = %s AND komoditas_id IN ({','.join(['%s'] * len(komoditas_id))})
-        ORDER BY tanggal_harga ASC
-        """
-        cursor = connection.cursor()
-        cursor.execute(query, [daerah_id] + komoditas_id)
-        result = cursor.fetchall()
-        connection.close()
-
-        data = pd.DataFrame(result, columns=['tanggal_harga', 'komoditas_id', 'harga'])
-        return data
-    
-    except Exception as e:
-        if connection.is_connected():
-            connection.close()
-        return jsonify({"error": str(e)}), 500
-
-
-
-
-# Fungsi untuk prediksi inflasi
-@routes.route('/predict', methods=['GET'])
-def predict_inflation():
-    daerah_id = request.args.get('daerah_id', type=int, default=1)
-    komoditas_ids = [1, 2, 3, 4, 5]  # Termasuk daging ayam (id_komoditas = 5)
-
-    # Ambil data harga komoditas dari database
-    data = get_data_model(daerah_id, komoditas_ids)
-    
-    if data.empty:
-        return jsonify({"error": "No commodity price data found for the region"}), 404
-
-    # Ambil data tingkat inflasi dari database
-    # Panggil fungsi get_all_inflasi untuk mendapatkan data inflasi
-    inflasi_response = get_all_inflasi(daerah_id)
-    
-    # Ambil data JSON dari response
-    inflasi_data = inflasi_response.get_json()  # Mengambil data JSON dari response
-
-    if "data" not in inflasi_data or not inflasi_data["data"]:
-        return jsonify({"error": f"No inflation data found for the region with daerah_id {daerah_id}"}), 404
-
-    # Konversi data inflasi ke DataFrame
-    inflasi_df = pd.DataFrame(inflasi_data["data"])
-
-    # Gabungkan data harga komoditas dengan data inflasi berdasarkan tanggal_harga
-    data = data.merge(inflasi_df[['tanggal_inflasi', 'tingkat_inflasi']], left_on='tanggal_harga', right_on='tanggal_inflasi', how='left')
-
-    # Pivot data untuk membuat format yang sesuai
-    data_pivot = data.pivot(index='tanggal_harga', columns='komoditas_id', values='harga')
-    data_pivot.columns = ['Bawang Merah', 'Bawang Putih', 'Cabai Merah Keriting', 'Cabai Rawit Hijau', 'Daging Ayam']
-
-    # Tambahkan kolom tingkat inflasi sebagai fitur ke data pivot
-    data_pivot['Tingkat Inflasi'] = data['tingkat_inflasi']
-    
-    # Normalisasi data
-    scaler_features = MinMaxScaler(feature_range=(0, 1))
-    scaled_features = scaler_features.fit_transform(data_pivot)
-
-    # Ambil data terakhir untuk prediksi
-    input_seq = scaled_features[-1].reshape(1, 1, scaled_features.shape[1])  # Data terakhir
-
-    # Prediksi dengan model
-    pred = model.predict(input_seq)
-
-    # Denormalisasi hasil prediksi
-    scaler_target = MinMaxScaler(feature_range=(0, 1))  # Anda perlu scaler yang sama saat melatih
-    predicted_inflation = scaler_target.inverse_transform(pred.reshape(-1, 1))
-
-    # Return hasil prediksi
-    return jsonify({
-        'predicted_inflation': float(predicted_inflation.flatten()[0])
-    })

@@ -1,32 +1,19 @@
 # Virtual environment
 venv/
-
-# Environment file
-.env
-
-# Database file
-database.db
-
-# Model files
-model/*.h5
+.venv/
 
 # Python cache
 __pycache__/
+*.py[cod]
 
-# VS Code settings
-.vscode/
+# Environment variables
+.env
 
-# Docker ignore
-.dockerignore
 
-# Log files
+
+# Logs
 *.log
 
-# Byte-compiled / optimised / DLL files
-*.pyc
-*.pyo
-*.pyd
 
-# Distribution / packaging
-.Python
-*.egg-info/
+# Docker-related files
+docker-compose.override.yml
